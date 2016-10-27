@@ -24,12 +24,15 @@
 #define CAM_PWR_APID 630
 #define CAM_IMU_APID 640
 
+#define XBEE_ADDR 0x0006
+#define XBEE_ID 0x0B0B
+
 //// Hardware
 Adafruit_BNO055 bno = Adafruit_BNO055(-1, 0x29);
 Adafruit_MCP9808 tempsensor = Adafruit_MCP9808();
 RTC_DS1307 rtc;
 Adafruit_BME280 bme;
-Adafruit_ADS1015 ads;
+Adafruit_ADS1015 ads(0x4A);
 SSC ssc(0x28, 255);
 
 //// Serial object aliases
@@ -157,6 +160,7 @@ void setup(void){
   }
 
   ads.begin();
+  ads.setGain(GAIN_ONE);
   debug_serial.println("Initialized ADS1015");
 
   SPI.begin();
@@ -171,7 +175,7 @@ void setup(void){
   // xbee
   debug_serial.println("Beginning xbee init");
   
-  int xbeeStatus = InitXBee(0x0015, 0x0B0B, xbee_serial, true);
+  int xbeeStatus = InitXBee(XBEE_ADDR, XBEE_ID, xbee_serial, false);
   if(!xbeeStatus) {
     debug_serial.println("XBee Initialized!");
   } else {
@@ -266,8 +270,15 @@ void command_response(uint8_t data[], uint8_t data_len, struct IMUData_s IMUData
    *  packet is a CAMERA command packet, and if so, process it
    */
 
+  debug_serial.print("Rcvd: ");
+  for (int i =0; i<8;i++){
+    debug_serial.print(data[i],HEX);
+    debug_serial.print(", ");
+  }
+  debug_serial.println();
+
   // get the APID (the field which identifies the type of packet)
-  uint8_t _APID = getAPID(data);
+  uint16_t _APID = getAPID(data);
     
   // check if the data is a command packet with the LINK command APID
   if(getPacketType(data) && _APID == CAM_CMD_APID){
@@ -298,7 +309,7 @@ void command_response(uint8_t data[], uint8_t data_len, struct IMUData_s IMUData
          *   Xbee address (1 byte)
          */
         
-        debug_serial.print("Received HK_Req Cmd");
+        debug_serial.println("Received HK_Req Cmd");
         
         // create a HK pkt
         pktLength = create_HK_pkt(HK_Pkt_Buff);
@@ -318,7 +329,7 @@ void command_response(uint8_t data[], uint8_t data_len, struct IMUData_s IMUData
          *   Xbee address (1 byte)
          */
         
-        debug_serial.print("Received ENV_Req Cmd");
+        debug_serial.println("Received ENV_Req Cmd");
         
         // create a HK pkt
         pktLength = create_ENV_pkt(HK_Pkt_Buff, ENVData);
@@ -338,7 +349,7 @@ void command_response(uint8_t data[], uint8_t data_len, struct IMUData_s IMUData
          *   Xbee address (1 byte)
          */
         
-        debug_serial.print("Received PWR_Req Cmd");
+        debug_serial.println("Received PWR_Req Cmd");
         
         // create a HK pkt
         pktLength = create_PWR_pkt(HK_Pkt_Buff, PWRData);
@@ -358,7 +369,7 @@ void command_response(uint8_t data[], uint8_t data_len, struct IMUData_s IMUData
          *   Xbee address (1 byte)
          */
         
-        debug_serial.print("Received IMU_Req Cmd");
+        debug_serial.println("Received IMU_Req Cmd");
         
         // create a HK pkt
         pktLength = create_IMU_pkt(HK_Pkt_Buff, IMUData);
@@ -381,7 +392,9 @@ void command_response(uint8_t data[], uint8_t data_len, struct IMUData_s IMUData
     
   }
   else{
-    debug_serial.print("Unrecognized apid 0x");
+    debug_serial.print("Unrecognized ");
+    debug_serial.print(getPacketType(data));
+    debug_serial.print(" pkt apid 0x");
     debug_serial.println(_APID, HEX);
   }
 }
@@ -459,20 +472,11 @@ void read_env(struct ENVData_s *ENVData){
   //MCP9808
   ENVData->mcp_temp = tempsensor.readTempC(); // degC
 }
+
 void read_pwr(struct PWRData_s *PWRData){
-
-  //ADS1015
-  debug_serial.print("ADS1015: ");
-  debug_serial.print("A0: ");
-  debug_serial.print(ads.readADC_SingleEnded(0));
-  debug_serial.print(", A1: ");
-  debug_serial.print(ads.readADC_SingleEnded(1));
-  debug_serial.print(", A2: ");
-  debug_serial.print(ads.readADC_SingleEnded(2));
-  debug_serial.print(", A3: ");
-  debug_serial.println(ads.readADC_SingleEnded(3));
   
-
+  PWRData->batt_volt = ((float)ads.readADC_SingleEnded(2)) * 3.0606; // V
+  PWRData->i_consump = (((float)ads.readADC_SingleEnded(3)) * 3.0606 - 2.5) * 10;
 }
 
 void read_imu(struct IMUData_s *IMUData){
