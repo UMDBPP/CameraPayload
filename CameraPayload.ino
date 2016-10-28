@@ -26,6 +26,7 @@
 
 #define XBEE_ADDR 0x0006
 #define XBEE_ID 0x0B0B
+#define LINK_XBEE_ADDR 0x0002
 
 //// Hardware
 Adafruit_BNO055 bno = Adafruit_BNO055(-1, 0x29);
@@ -284,9 +285,8 @@ void command_response(uint8_t data[], uint8_t data_len, struct IMUData_s IMUData
   if(getPacketType(data) && _APID == CAM_CMD_APID){
 
     uint8_t FcnCode = getCmdFunctionCode(data);
-    uint8_t destAddr = 0;
     uint16_t pktLength = 0;
-    uint8_t HK_Pkt_Buff[100];
+    uint8_t Pkt_Buff[100];
 
     // respond to the command depending on what type of command it is
     switch(FcnCode){
@@ -312,10 +312,29 @@ void command_response(uint8_t data[], uint8_t data_len, struct IMUData_s IMUData
         debug_serial.println("Received HK_Req Cmd");
         
         // create a HK pkt
-        pktLength = create_HK_pkt(HK_Pkt_Buff);
+        pktLength = create_HK_pkt(Pkt_Buff);
 
         // send the HK packet via xbee and log it
-        xbee_send_and_log(destAddr, HK_Pkt_Buff, sizeof(HK_Pkt_Buff));
+        xbee_send_and_log(LINK_XBEE_ADDR, Pkt_Buff, pktLength);
+        
+        // increment the cmd executed counter
+        CmdExeCtr++;
+        break;
+
+      // ResetCtr
+      case 15:
+        // Requests that an HK packet be sent to the specified xbee address
+        /*  Command format:
+         *   CCSDS Command Header (8 bytes)
+         *   Xbee address (1 byte)
+         */
+        
+        debug_serial.println("Received ResetCtr Cmd");
+        
+        CmdExeCtr = 0;
+        CmdRejCtr = 0;
+        XbeeRcvdByteCtr = 0;
+        XbeeSentByteCtr = 0;
         
         // increment the cmd executed counter
         CmdExeCtr++;
@@ -332,10 +351,10 @@ void command_response(uint8_t data[], uint8_t data_len, struct IMUData_s IMUData
         debug_serial.println("Received ENV_Req Cmd");
         
         // create a HK pkt
-        pktLength = create_ENV_pkt(HK_Pkt_Buff, ENVData);
+        pktLength = create_ENV_pkt(Pkt_Buff, ENVData);
 
         // send the HK packet via xbee and log it
-        xbee_send_and_log(destAddr, HK_Pkt_Buff, sizeof(HK_Pkt_Buff));
+        xbee_send_and_log(LINK_XBEE_ADDR, Pkt_Buff, pktLength);
         
         // increment the cmd executed counter
         CmdExeCtr++;
@@ -352,10 +371,10 @@ void command_response(uint8_t data[], uint8_t data_len, struct IMUData_s IMUData
         debug_serial.println("Received PWR_Req Cmd");
         
         // create a HK pkt
-        pktLength = create_PWR_pkt(HK_Pkt_Buff, PWRData);
+        pktLength = create_PWR_pkt(Pkt_Buff, PWRData);
 
         // send the HK packet via xbee and log it
-        xbee_send_and_log(destAddr, HK_Pkt_Buff, sizeof(HK_Pkt_Buff));
+        xbee_send_and_log(LINK_XBEE_ADDR, Pkt_Buff, pktLength);
         
         // increment the cmd executed counter
         CmdExeCtr++;
@@ -372,10 +391,10 @@ void command_response(uint8_t data[], uint8_t data_len, struct IMUData_s IMUData
         debug_serial.println("Received IMU_Req Cmd");
         
         // create a HK pkt
-        pktLength = create_IMU_pkt(HK_Pkt_Buff, IMUData);
+        pktLength = create_IMU_pkt(Pkt_Buff, IMUData);
 
         // send the HK packet via xbee and log it
-        xbee_send_and_log(destAddr, HK_Pkt_Buff, sizeof(HK_Pkt_Buff));
+        xbee_send_and_log(LINK_XBEE_ADDR, Pkt_Buff, pktLength);
         
         // increment the cmd executed counter
         CmdExeCtr++;
@@ -475,8 +494,8 @@ void read_env(struct ENVData_s *ENVData){
 
 void read_pwr(struct PWRData_s *PWRData){
   
-  PWRData->batt_volt = ((float)ads.readADC_SingleEnded(2)) * 3.0606; // V
-  PWRData->i_consump = (((float)ads.readADC_SingleEnded(3)) * 3.0606 - 2.5) * 10;
+  PWRData->batt_volt = ((float)ads.readADC_SingleEnded(2)) * 0.002 * 3.0606; // V
+  PWRData->i_consump = (((float)ads.readADC_SingleEnded(3)) * 0.002 - 2.5) * 10;
 }
 
 void read_imu(struct IMUData_s *IMUData){
@@ -693,7 +712,7 @@ void xbee_send_and_log(uint8_t dest_addr, uint8_t data[], uint8_t data_len){
  */
  
   // send the data via xbee
-  _sendData(dest_addr, data, sizeof(data));
+  _sendData(dest_addr, data, data_len);
 
   debug_serial.print("Forwarding: ");
   for(int i = 0; i <= data_len; i++){
