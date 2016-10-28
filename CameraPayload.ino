@@ -1,3 +1,4 @@
+#include <avr/wdt.h>
 #include <Wire.h>
 #include <SPI.h>
 #include <Adafruit_Sensor.h>
@@ -88,6 +89,9 @@ uint16_t CmdRejCtr = 0;
 uint32_t XbeeRcvdByteCtr = 0;
 uint32_t XbeeSentByteCtr = 0;
 
+// other variables
+uint8_t reboot_flag = 0;
+
 // logging files
 File xbeeLogFile;
 File IMULogFile;
@@ -112,6 +116,9 @@ void xbee_send_and_log(uint8_t dest_addr, uint8_t data[], uint8_t data_len);
 void logPkt(File file, uint8_t data[], uint8_t len, uint8_t received_flg);
 
 void setup(void){
+  wdt_disable();
+  wdt_enable(WDTO_4S);
+  
   // begin main serial (used for debugging output)
   debug_serial.begin(250000);
   debug_serial.println("GoGoGadget Camera payload!");
@@ -209,6 +216,12 @@ void loop(void){
    *  Log sensors
    *  Reads from xbee and processes any data
    */
+
+  // reset the watchdog timer
+  if(!reboot_flag){
+    wdt_reset();
+  }
+  
   // declare structures to store data
   IMUData_s IMUData;
   PWRData_s PWRData;
@@ -399,6 +412,19 @@ void command_response(uint8_t data[], uint8_t data_len, struct IMUData_s IMUData
         // increment the cmd executed counter
         CmdExeCtr++;
         break;
+        
+      // Reboot
+      case 99:
+        // Requests that Link reboot
+
+        debug_serial.println("Received Reboot Cmd");
+
+        // set the reboot flag to true
+        reboot_flag = 1;
+
+        // increment the cmd executed counter
+        CmdExeCtr++;
+        break;  
         
       // unrecognized fcn code
       default:
