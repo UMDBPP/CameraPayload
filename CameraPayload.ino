@@ -1,11 +1,11 @@
-#include <avr/wdt.h>
+#include <avr/wdt.h> // watchdog timer
 #include <Wire.h>
 #include <SPI.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BNO055.h>
 #include <utility/imumaths.h>
 #include "Adafruit_MCP9808.h"
-#include "RTClib.h"
+#include "RTClib.h" // RTC and SoftRTC
 #include <Adafruit_BME280.h>
 #include <SD.h>
 #include <Adafruit_ADS1015.h>
@@ -15,24 +15,39 @@
 #include <SSC.h>
 
 //// Enumerations
+// logging flag
 #define LOG_RCVD 1
 #define LOG_SEND 0
 
-// 
+// CAMERA APIDS
 #define CAM_CMD_APID 600
 #define CAM_HK_APID 610
 #define CAM_ENV_APID 620
 #define CAM_PWR_APID 630
 #define CAM_IMU_APID 640
 
-#define XBEE_ADDR 0x0006
-#define XBEE_ID 0x0B0B
-#define LINK_XBEE_ADDR 0x0002
+// CAMERA FcnCodes
+#define CAM_NOOP_CMD 0
+#define CAM_HKREQ_CMD 10
+#define CAM_RESETCTR_CMD 15
+#define CAM_REQENV_CMD 20
+#define CAM_REQPWR_CMD 30
+#define CAM_REQIMU_CMD 40
+#define CAM_REBOOT_CMD 99
 
-//// Hardware
+//// Xbee setup parameters
+#define CAM_XBEE_ADDR 0x0006 // XBee address for this payload 
+// DO NOT CHANGE without making corresponding change in ground system definitions
+#define CAM_XBEE_ID 0x0B0B // XBee PAN address (must be the same for all xbees)
+// DO NOT CHANGE without changing for all xbees
+#define LINK_XBEE_ADDR 0x0002
+// DO NOT CHANGE without confirming with ground system definitions
+
+//// Declare objects
 Adafruit_BNO055 bno = Adafruit_BNO055(-1, 0x29);
 Adafruit_MCP9808 tempsensor = Adafruit_MCP9808();
 RTC_DS1307 rtc;
+RTC_Millis SoftRTC;   // This is the millis()-based software RTC
 Adafruit_BME280 bme;
 Adafruit_ADS1015 ads(0x4A);
 SSC ssc(0x28, 255);
@@ -45,6 +60,10 @@ SSC ssc(0x28, 255);
 //// Data Structures
 // imu data
 struct IMUData_s {
+   uint8_t system_cal;
+   uint8_t accel_cal;
+   uint8_t gyro_cal;
+   uint8_t mag_cal;
    float accel_x;
    float accel_y;
    float accel_z;
@@ -90,7 +109,7 @@ uint32_t XbeeRcvdByteCtr = 0;
 uint32_t XbeeSentByteCtr = 0;
 
 // other variables
-uint8_t reboot_flag = 0;
+uint32_t start_millis = 0;
 
 // logging files
 File xbeeLogFile;
@@ -100,33 +119,66 @@ File PWRLogFile;
 File initLogFile;
 
 //// Function prototypes
+void command_response(uint8_t data[], uint8_t data_len, struct IMUData_s IMUData, struct ENVData_s ENVData, struct PWRData_s PWRData);
+
+// interface
+void xbee_send_and_log(uint8_t dest_addr, uint8_t data[], uint8_t data_len);
+void logPkt(File file, uint8_t data[], uint8_t len, uint8_t received_flg);
+
+// pkt creation
 uint16_t create_HK_pkt(uint8_t HK_Pkt_Buff[]);
 uint16_t create_IMU_pkt(uint8_t HK_Pkt_Buff[], struct IMUData_s IMUData);
 uint16_t create_PWR_pkt(uint8_t HK_Pkt_Buff[], struct PWRData_s PWRData);
 uint16_t create_ENV_pkt(uint8_t HK_Pkt_Buff[], struct ENVData_s ENVData);
+
+// sensor reading
 void read_imu(struct IMUData_s *IMUData);
 void read_env(struct ENVData_s *ENVData);
 void read_pwr(struct PWRData_s *PWRData);
-void log_imu(struct IMUData_s IMUData, File IMULogFile);
-void log_env(struct PWRData_s PWRData, File ENVLogFile);
-void log_pwr(struct ENVData_s ENVData, File PWRLogFile);
-void printtime(File file);
-void command_response(uint8_t data[], uint8_t data_len, struct IMUData_s IMUData, struct ENVData_s ENVData, struct PWRData_s PWRData);
-void xbee_send_and_log(uint8_t dest_addr, uint8_t data[], uint8_t data_len);
-void logPkt(File file, uint8_t data[], uint8_t len, uint8_t received_flg);
 
+// log data
+void log_imu(struct IMUData_s IMUData, File IMULogFile);
+void log_env(struct ENVData_s ENVData, File ENVLogFile);
+void log_pwr(struct PWRData_s PWRData, File PWRLogFile);
+
+// utility
+void print_time(File file);
+
+//// CODE:
 void setup(void){
+/* setup()
+   *  
+   * Disables watchdog timer (in case its on)
+   * Initalizes all the link hardware/software including:
+   *   Serial
+   *   Xbee
+   *   RTC
+   *   SoftRTC
+   *   BNO
+   *   MCP
+   *   BME
+   *   SSC
+   *   ADS
+   *   SD card
+   *   Log files
+   */
+  // disable the watchdog timer immediately in case it was on because of a 
+  // commanded reboot
   wdt_disable();
-  wdt_enable(WDTO_4S);
-  
-  // begin main serial (used for debugging output)
+
+  //// Init serial ports:
+  /*  aliases defined above are used to reduce confusion about which serial
+   *    is connected to what interface
+   *  xbee serial is lower baud rates because the hardware 
+   *    defaults to that baud rate. higher baud rates need to be tested
+   *    before they're used with those devices
+   */
   debug_serial.begin(250000);
+  xbee_serial.begin(9600);
+  
   debug_serial.println("GoGoGadget Camera payload!");
 
-  // begin xbee serial
-  xbee_serial.begin(9600);
-
-  //BNO
+  //// BNO
   if(!bno.begin()){
     debug_serial.println("BNO055 NOT detected.");
   }
@@ -136,7 +188,7 @@ void setup(void){
   delay(1000);
   bno.setExtCrystalUse(true);
 
-  //MCP9808
+  //// MCP9808
   if (!tempsensor.begin(0x18)) {
     debug_serial.println("MCP9808 NOT detected.");
   }
@@ -144,6 +196,11 @@ void setup(void){
     debug_serial.println("MCP9808 detected!");
   }
 
+  //// RTC
+  /* The RTC is used so that the log files contain timestamps. If the RTC
+   *  is not running (because no battery is inserted) the RTC will be initalized
+   *  to the time that this sketch was compiled at.
+   */
   if (! rtc.begin()) {
     debug_serial.println("DS1308 NOT detected.");
   }
@@ -160,6 +217,11 @@ void setup(void){
     // rtc.adjust(DateTime(2014, 1, 21, 3, 0, 0));
   }
 
+  //// SoftRTC (for subsecond precision)
+  SoftRTC.begin(rtc.now());  // Initialize SoftRTC to the current time
+  start_millis = millis();  // get the current millisecond count
+
+  //// Init BME
   if (!bme.begin(0x76)) {
     debug_serial.println("BME280 NOT detected.");
   }
@@ -167,10 +229,12 @@ void setup(void){
     debug_serial.println("BME280 detected!");
   }
 
+  //// Init ADS
   ads.begin();
   ads.setGain(GAIN_ONE);
   debug_serial.println("Initialized ADS1015");
 
+  //// Init SD card
   SPI.begin();
   pinMode(53,OUTPUT);
   if (!SD.begin(53)) {
@@ -183,15 +247,16 @@ void setup(void){
   // xbee
   debug_serial.println("Beginning xbee init");
   
-  int xbeeStatus = InitXBee(XBEE_ADDR, XBEE_ID, xbee_serial, false);
+  int xbeeStatus = InitXBee(CAM_XBEE_ADDR, CAM_XBEE_ID, xbee_serial, false);
   if(!xbeeStatus) {
     debug_serial.println("XBee Initialized!");
   } else {
     debug_serial.print("XBee Failed to Initialize with Error Code: ");
     debug_serial.println(xbeeStatus);
   }
-
-   //  set min / max reading and pressure, see datasheet for the values for your 
+  
+  //// Init SSC
+  //  set min / max reading and pressure, see datasheet for the values for your 
   //  sensor
   ssc.setMinRaw(0);
   ssc.setMaxRaw(16383);
@@ -204,6 +269,7 @@ void setup(void){
 
   //MicroSD
   // appends to current file
+  // NOTE: Filenames must be shorter than 8 characters
   File IMULogFile = SD.open("IMU_LOG.txt", FILE_WRITE);
   File PWRLogFile = SD.open("PWR_LOG.txt", FILE_WRITE);
   File ENVLogFile = SD.open("ENV_LOG.txt", FILE_WRITE);
@@ -216,11 +282,6 @@ void loop(void){
    *  Log sensors
    *  Reads from xbee and processes any data
    */
-
-  // reset the watchdog timer
-  if(!reboot_flag){
-    wdt_reset();
-  }
   
   // declare structures to store data
   IMUData_s IMUData;
@@ -236,14 +297,17 @@ void loop(void){
   if(imu_read_ctr > imu_read_lim){
     read_imu(&IMUData);
     log_imu(IMUData, IMULogFile);
+    imu_read_ctr = 0;
   }
   if(pwr_read_ctr > pwr_read_lim){
     read_pwr(&PWRData);
     log_pwr(PWRData, PWRLogFile);
+    pwr_read_ctr = 0;
   }
   if(env_read_ctr > env_read_lim){
     read_env(&ENVData);
     log_env(ENVData, ENVLogFile);
+    env_read_ctr = 0;
   }  
 
   // initalize a counter to record how many bytes were read this iteration
@@ -294,18 +358,19 @@ void command_response(uint8_t data[], uint8_t data_len, struct IMUData_s IMUData
   // get the APID (the field which identifies the type of packet)
   uint16_t _APID = getAPID(data);
     
-  // check if the data is a command packet with the LINK command APID
+  // check if the data is a command packet with the Camera command APID
   if(getPacketType(data) && _APID == CAM_CMD_APID){
 
     uint8_t FcnCode = getCmdFunctionCode(data);
     uint16_t pktLength = 0;
     uint8_t Pkt_Buff[100];
+    uint8_t destAddr = 0;
 
     // respond to the command depending on what type of command it is
     switch(FcnCode){
 
       // NoOp Cmd
-      case 0:
+      case CAM_NOOP_CMD:
         // No action other than to increment the interface counters
         
         debug_serial.println("Received NoOp Cmd");
@@ -315,7 +380,7 @@ void command_response(uint8_t data[], uint8_t data_len, struct IMUData_s IMUData
         break;
         
       // HK_Req
-      case 10:
+      case CAM_HKREQ_CMD:
         // Requests that an HK packet be sent to the specified xbee address
         /*  Command format:
          *   CCSDS Command Header (8 bytes)
@@ -323,19 +388,22 @@ void command_response(uint8_t data[], uint8_t data_len, struct IMUData_s IMUData
          */
         
         debug_serial.println("Received HK_Req Cmd");
+
+        // extract the desintation address from the command
+        extractFromTlm(destAddr, data, 8);
         
         // create a HK pkt
         pktLength = create_HK_pkt(Pkt_Buff);
 
         // send the HK packet via xbee and log it
-        xbee_send_and_log(LINK_XBEE_ADDR, Pkt_Buff, pktLength);
-        
+        xbee_send_and_log(destAddr, Pkt_Buff, pktLength);
+          
         // increment the cmd executed counter
         CmdExeCtr++;
         break;
 
       // ResetCtr
-      case 15:
+      case CAM_RESETCTR_CMD:
         // Requests that an HK packet be sent to the specified xbee address
         /*  Command format:
          *   CCSDS Command Header (8 bytes)
@@ -354,7 +422,7 @@ void command_response(uint8_t data[], uint8_t data_len, struct IMUData_s IMUData
         break;
                 
       // ENV_Req
-      case 20:
+      case CAM_REQENV_CMD:
         // Requests that an HK packet be sent to the specified xbee address
         /*  Command format:
          *   CCSDS Command Header (8 bytes)
@@ -362,19 +430,22 @@ void command_response(uint8_t data[], uint8_t data_len, struct IMUData_s IMUData
          */
         
         debug_serial.println("Received ENV_Req Cmd");
+
+        // extract the desintation address from the command
+        extractFromTlm(destAddr, data, 8);
         
         // create a HK pkt
         pktLength = create_ENV_pkt(Pkt_Buff, ENVData);
 
         // send the HK packet via xbee and log it
-        xbee_send_and_log(LINK_XBEE_ADDR, Pkt_Buff, pktLength);
+        xbee_send_and_log(destAddr, Pkt_Buff, pktLength);
         
         // increment the cmd executed counter
         CmdExeCtr++;
         break;
         
       // PWR_Req
-      case 30:
+      case CAM_REQPWR_CMD:
         // Requests that an HK packet be sent to the specified xbee address
         /*  Command format:
          *   CCSDS Command Header (8 bytes)
@@ -382,19 +453,22 @@ void command_response(uint8_t data[], uint8_t data_len, struct IMUData_s IMUData
          */
         
         debug_serial.println("Received PWR_Req Cmd");
+
+        // extract the desintation address from the command
+        extractFromTlm(destAddr, data, 8);
         
         // create a HK pkt
         pktLength = create_PWR_pkt(Pkt_Buff, PWRData);
 
         // send the HK packet via xbee and log it
-        xbee_send_and_log(LINK_XBEE_ADDR, Pkt_Buff, pktLength);
+        xbee_send_and_log(destAddr, Pkt_Buff, pktLength);
         
         // increment the cmd executed counter
         CmdExeCtr++;
         break;
         
       // IMU_Req
-      case 40:
+      case CAM_REQIMU_CMD:
         // Requests that an HK packet be sent to the specified xbee address
         /*  Command format:
          *   CCSDS Command Header (8 bytes)
@@ -402,25 +476,28 @@ void command_response(uint8_t data[], uint8_t data_len, struct IMUData_s IMUData
          */
         
         debug_serial.println("Received IMU_Req Cmd");
+
+        // extract the desintation address from the command
+        extractFromTlm(destAddr, data, 8);
         
         // create a HK pkt
         pktLength = create_IMU_pkt(Pkt_Buff, IMUData);
 
         // send the HK packet via xbee and log it
-        xbee_send_and_log(LINK_XBEE_ADDR, Pkt_Buff, pktLength);
+        xbee_send_and_log(destAddr, Pkt_Buff, pktLength);
         
         // increment the cmd executed counter
         CmdExeCtr++;
         break;
         
       // Reboot
-      case 99:
+      case CAM_REBOOT_CMD:
         // Requests that Link reboot
 
         debug_serial.println("Received Reboot Cmd");
 
-        // set the reboot flag to true
-        reboot_flag = 1;
+        // set the reboot timer
+        wdt_enable(WDTO_1S);
 
         // increment the cmd executed counter
         CmdExeCtr++;
@@ -433,9 +510,9 @@ void command_response(uint8_t data[], uint8_t data_len, struct IMUData_s IMUData
         
         // reject command
         CmdRejCtr++;
-    }
+    } // end switch(FcnCode)
     
-  }
+  } // if(getPacketType(data) && _APID == CAM_CMD_APID)
   else{
     debug_serial.print("Unrecognized ");
     debug_serial.print(getPacketType(data));
@@ -446,9 +523,17 @@ void command_response(uint8_t data[], uint8_t data_len, struct IMUData_s IMUData
 
 void log_imu(struct IMUData_s IMUData, File IMULogFile){
   // print the time to the file
-  printtime(IMULogFile);
+  print_time(IMULogFile);
 
   // print the sensor values
+  IMULogFile.print(", ");
+  IMULogFile.print(IMUData.system_cal);
+  IMULogFile.print(", ");
+  IMULogFile.print(IMUData.accel_cal);
+  IMULogFile.print(", ");
+  IMULogFile.print(IMUData.gyro_cal);
+  IMULogFile.print(", ");
+  IMULogFile.print(IMUData.mag_cal);
   IMULogFile.print(", ");
   IMULogFile.print(IMUData.accel_x);
   IMULogFile.print(", ");
@@ -467,10 +552,13 @@ void log_imu(struct IMUData_s IMUData, File IMULogFile){
   IMULogFile.print(IMUData.mag_y);
   IMULogFile.print(", ");
   IMULogFile.println(IMUData.mag_z);
+
+  IMULogFile.flush();
 }
+
 void log_env(struct ENVData_s ENVData, File ENVLogFile){
   // print the time to the file
-  printtime(ENVLogFile);
+  print_time(ENVLogFile);
 
   // print the sensor values
   ENVLogFile.print(", ");
@@ -487,17 +575,21 @@ void log_env(struct ENVData_s ENVData, File ENVLogFile){
   ENVLogFile.print(ENVData.bno_temp);
   ENVLogFile.print(", ");
   ENVLogFile.println(ENVData.mcp_temp);
+
+  ENVLogFile.flush();
 }
 
 void log_pwr(struct PWRData_s PWRData, File PWRLogFile){
   // print the time to the file
-  printtime(PWRLogFile);
+  print_time(PWRLogFile);
   
   // print the sensor values
   PWRLogFile.print(", ");
   PWRLogFile.print(PWRData.batt_volt);
   PWRLogFile.print(", ");
   PWRLogFile.println(PWRData.i_consump);
+
+  PWRLogFile.flush();
 }
 
 void read_env(struct ENVData_s *ENVData){
@@ -507,10 +599,11 @@ void read_env(struct ENVData_s *ENVData){
   ENVData->bme_humid = bme.readHumidity(); // %
 
   //  SSC
+  /*
   ssc.update();
   ENVData->ssc_pres = ssc.pressure(); // PSI
   ENVData->ssc_temp = ssc.temperature(); // degC
-
+*/
   // BNO
   ENVData->bno_temp = bno.getTemp();
   
@@ -534,7 +627,11 @@ void read_imu(struct IMUData_s *IMUData){
   imu::Vector<3> gyro = bno.getVector(Adafruit_BNO055::VECTOR_GYROSCOPE); // (values in rps, radians per second)
   imu::Vector<3> accel = bno.getVector(Adafruit_BNO055::VECTOR_ACCELEROMETER); // (values in m/s^2)
 
-  // assign them into global variables
+  // assign them into structure fields
+  IMUData->system_cal = system_cal;
+  IMUData->accel_cal = accel_cal;
+  IMUData->gyro_cal = gyro_cal;
+  IMUData->mag_cal = mag_cal;
   IMUData->accel_x = accel.x();
   IMUData->accel_y = accel.y();
   IMUData->accel_z = accel.z();
@@ -713,6 +810,10 @@ uint16_t create_IMU_pkt(uint8_t HK_Pkt_Buff[], struct IMUData_s IMUData){
   setTlmTimeSubSec(HK_Pkt_Buff, now.unixtime() % 1000L);
 
   // Add counter values to the pkt
+  payloadSize = addIntToTlm(IMUData.system_cal, HK_Pkt_Buff, payloadSize); // Add system cal status to message [uint8_t]
+  payloadSize = addIntToTlm(IMUData.accel_cal, HK_Pkt_Buff, payloadSize); // Add accelerometer cal status to message [uint8_t]
+  payloadSize = addIntToTlm(IMUData.gyro_cal, HK_Pkt_Buff, payloadSize); // Add gyro cal status to message [uint8_t]
+  payloadSize = addIntToTlm(IMUData.mag_cal, HK_Pkt_Buff, payloadSize); // Add mnagnetomter cal status to message [uint8_t]
   payloadSize = addFloatToTlm(IMUData.accel_x, HK_Pkt_Buff, payloadSize); // Add battery accelerometer x to message [Float]
   payloadSize = addFloatToTlm(IMUData.accel_y, HK_Pkt_Buff, payloadSize); // Add battery accelerometer y to message [Float]
   payloadSize = addFloatToTlm(IMUData.accel_z, HK_Pkt_Buff, payloadSize); // Add battery accelerometer z to message [Float]
@@ -775,7 +876,7 @@ void logPkt(File file, uint8_t data[], uint8_t len, uint8_t received_flg){
     }
     
     // Print a timestamp
-    printtime(file);
+    print_time(file);
 
    char buf[50];
 
@@ -792,7 +893,7 @@ void logPkt(File file, uint8_t data[], uint8_t len, uint8_t received_flg){
    }
 }
 
-void printtime(File file){
+void print_time(File file){
 /*  print_time()
  * 
  *  Prints the current time to the given log file
