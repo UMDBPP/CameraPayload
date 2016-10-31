@@ -270,9 +270,18 @@ void setup(void){
   //MicroSD
   // appends to current file
   // NOTE: Filenames must be shorter than 8 characters
-  File IMULogFile = SD.open("IMU_LOG.txt", FILE_WRITE);
-  File PWRLogFile = SD.open("PWR_LOG.txt", FILE_WRITE);
-  File ENVLogFile = SD.open("ENV_LOG.txt", FILE_WRITE);
+  IMULogFile = SD.open("IMU_LOG.txt", FILE_WRITE);
+  IMULogFile.println("DateTime,SystemCal[0-3],AccelCal[0-3],GyroCal[0-3],MagCal[0-3],AccelX[m/s^2],AccelY[m/s^2],AccelZ[m/s^2],GyroX[rad/s],GyroY[rad/s],GyroZ[rad/s],MagX[uT],MagY[uT],MagZ[uT]");
+  IMULogFile.flush();  
+  delay(10);
+  PWRLogFile = SD.open("PWR_LOG.txt", FILE_WRITE);
+  PWRLogFile.println("DateTime,BatteryVoltage[V],CurrentConsumption[A]");
+  PWRLogFile.flush();
+  delay(10);
+  ENVLogFile = SD.open("ENV_LOG.txt", FILE_WRITE);
+  ENVLogFile.println("DateTime,BMEPressure[hPa],BMETemp[degC],BMEHumidity[%],SSCPressure[PSI],SSCTemp[degC],BNOTemp[degC],MCPTemp[degC]");
+  ENVLogFile.flush();
+  delay(10);  
 }
 
 void loop(void){
